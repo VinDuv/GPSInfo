@@ -1,4 +1,4 @@
-// Copyright 2018 Vincent Duvert.
+// Copyright 2018-2022 Vincent Duvert.
 // Distributed under the terms of the MIT License.
 
 import UIKit
@@ -187,7 +187,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var viewController: UIViewController!
     let locationUpdater = LocationUpdater()
     
-    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplicationLaunchOptionsKey: Any]?) -> Bool {
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         
         let window = UIWindow(frame: UIScreen.main.bounds)
         self.window = window
@@ -207,8 +207,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         
         parentView.addSubview(tableView)
         
-        tableView.topAnchor.constraint(equalTo: viewController.topLayoutGuide.bottomAnchor).isActive = true
-        tableView.bottomAnchor.constraint(equalTo: viewController.bottomLayoutGuide.topAnchor).isActive = true
+        tableView.topAnchor.constraint(equalTo: parentView.safeAreaLayoutGuide.topAnchor).isActive = true
+        tableView.bottomAnchor.constraint(equalTo: parentView.safeAreaLayoutGuide.bottomAnchor).isActive = true
         tableView.leftAnchor.constraint(equalTo: parentView.leftAnchor).isActive = true
         tableView.rightAnchor.constraint(equalTo: parentView.rightAnchor).isActive = true
         
