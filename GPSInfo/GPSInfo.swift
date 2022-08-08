@@ -195,7 +195,7 @@ class LocationUpdater: NSObject, CLLocationManagerDelegate {
     }
     
     func start() {
-        if CLLocationManager.authorizationStatus() == .notDetermined {
+        if locationManager.authorizationStatus == .notDetermined {
             locationManager.requestWhenInUseAuthorization()
         }
         
