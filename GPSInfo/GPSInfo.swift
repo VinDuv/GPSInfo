@@ -5,24 +5,122 @@ import UIKit
 import CoreLocation
 import Dispatch
 
-enum DisplayedInfo: String {
-    case latitude = "Latitude"
-    case longitude = "Longitude"
-    case posAccuracy = "Position Accuracy"
-    case altitude = "Altitude"
-    case altAccurracy = "Altitude Accuracy"
-    case speed = "Speed"
-    case closestCity = "Closest City"
+protocol GPSInfoAttribute {
+    var name: String { get }
+    func get(from infos: GPSInfos) -> String
 }
 
-extension DisplayedInfo {
-    static var allCases : [DisplayedInfo] = [.latitude, .longitude, posAccuracy, .altitude, .altAccurracy, .speed, .closestCity]
+struct KeyPathInfo<ValType>: GPSInfoAttribute {
+    let name: String
+    let ref: KeyPath<GPSInfos, ValType?>
+    let fmt: (ValType) -> String
+
+    init(_ name: String, _ ref: KeyPath<GPSInfos, ValType?>, _ fmt: @escaping (ValType) -> String) {
+        self.name = name
+        self.ref = ref
+        self.fmt = fmt
+    }
+
+    init(_ name: String, _ ref: KeyPath<GPSInfos, ValType?>, _ fmt: String) {
+        self.name = name
+        self.ref = ref
+        self.fmt = { String(format: fmt, $0 as! CVarArg) }
+    }
+
+    func get(from infos: GPSInfos) -> String {
+        if let rawValue = infos[keyPath: ref] {
+            return fmt(rawValue)
+        }
+
+        return "—"
+    }
 }
 
-typealias InfoDict = [DisplayedInfo: String]
+struct GPSInfos: Sequence {
+    var latitude: CLLocationDegrees?
+    var longitude: CLLocationDegrees?
+    var posAccuracy: CLLocationAccuracy?
+    var altitude: CLLocationDistance?
+    var altAccuracy: CLLocationAccuracy?
+    var speed: CLLocationSpeed?
+    var closestCity: String?
+
+    var cityLocations: [(CLLocation, String)] = []
+    var lastCityUpdateLocation: CLLocation?
+
+    static let infoAttributes: [GPSInfoAttribute]  = [
+        KeyPathInfo("Latitude", \.latitude, "%.6f N"),
+        KeyPathInfo("Longitude", \.longitude, "%.6f E"),
+        KeyPathInfo("Position Accuracy", \.posAccuracy, "± %.2f m"),
+        KeyPathInfo("Altitude", \.altitude, "%.2f m"),
+        KeyPathInfo("Altitude Accuracy", \.altAccuracy, "± %.2f m"),
+        KeyPathInfo("Speed", \.speed, {
+            let kmHSpeed = $0 * 3600 / 1000
+            return String(format:"%.2f m/s (%.2f km/h)", $0, kmHSpeed)
+        }),
+        KeyPathInfo("Closest City", \.closestCity, { $0 })
+    ]
+
+    mutating func updateFrom(_ location: CLLocation) {
+        if location.horizontalAccuracy >= 0 {
+            let coordinates = location.coordinate
+            self.latitude = coordinates.latitude
+            self.longitude = coordinates.longitude
+            self.posAccuracy = location.horizontalAccuracy
+
+            if let prevLocation = lastCityUpdateLocation, closestCity != nil && prevLocation.distance(from: location) < 1000 {
+                // No need to update the city
+            } else {
+                lastCityUpdateLocation = location
+                updateClosestCity()
+            }
+        } else {
+            self.latitude = nil
+            self.longitude = nil
+            self.posAccuracy = nil
+            self.closestCity = nil
+            self.lastCityUpdateLocation = nil
+        }
+
+        if location.verticalAccuracy >= 0 {
+            self.altitude = location.altitude
+            self.altAccuracy = location.verticalAccuracy
+        }
+
+        let msSpeed = location.speed
+        if msSpeed >= 0 {
+            self.speed = msSpeed
+        } else {
+            self.speed = nil
+        }
+    }
+
+    private mutating func updateClosestCity() {
+        guard let location = lastCityUpdateLocation else { return }
+        guard !cityLocations.isEmpty else { return }
+
+        var closestCity: String = "<More than 100 km away>"
+        var closestCityDistance: Double = 100000.0
+
+        for (candidateCityLocation, candidateCityName) in cityLocations {
+            let distance = location.distance(from: candidateCityLocation)
+            if distance < closestCityDistance {
+                closestCity = candidateCityName
+                closestCityDistance = distance
+            }
+        }
+
+        self.closestCity = closestCity
+    }
+
+    func makeIterator() -> AnyIterator<(String, String)> {
+        let mapped = Self.infoAttributes.map {($0.name, $0.get(from: self))}
+        return AnyIterator(mapped.makeIterator())
+    }
+}
 
 class GPSInfoDisplay: NSObject, UITableViewDataSource {
-    var infoDict: InfoDict = [:]
+    var infos = GPSInfos()
     
     func numberOfSections(in tableView: UITableView) -> Int {
         return 1
@@ -31,7 +129,7 @@ class GPSInfoDisplay: NSObject, UITableViewDataSource {
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         precondition(section == 0)
 
-        return DisplayedInfo.allCases.count
+        return GPSInfos.infoAttributes.count
     }
     
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -53,11 +151,9 @@ class GPSInfoDisplay: NSObject, UITableViewDataSource {
             cell.detailTextLabel!.font = UIFont(descriptor: newDescriptor, size: 0)
         }
         
-        let info = DisplayedInfo.allCases[indexPath.row]
-        
-        cell.textLabel?.text = info.rawValue
-        
-        cell.detailTextLabel?.text = infoDict[info] ?? "—"
+        let infoAttr = GPSInfos.infoAttributes[indexPath.row]
+        cell.textLabel?.text = infoAttr.name
+        cell.detailTextLabel?.text = infoAttr.get(from: infos)
         
         return cell
     }
@@ -89,17 +185,14 @@ class GPSInfoDisplay: NSObject, UITableViewDataSource {
 
 class LocationUpdater: NSObject, CLLocationManagerDelegate {
     let locationManager = CLLocationManager()
-    var updateCallback: ((InfoDict) -> ())?
-    var lastCityUpdateLocation: CLLocation?
-    var lastCityFound: String?
-    var cityLocations: [(CLLocation, String)] = []
+    var updateCallback: ((CLLocation) -> ())?
+    var citiesLoadedCallback: (([(CLLocation, String)]) -> ())?
     
     struct StoredCity: Decodable {
         var city: String
         var lat: Double
         var long: Double
     }
-
     
     func start() {
         if CLLocationManager.authorizationStatus() == .notDetermined {
@@ -116,67 +209,16 @@ class LocationUpdater: NSObject, CLLocationManagerDelegate {
             let data = try! Data(contentsOf: url)
             let decoded = try! PropertyListDecoder().decode([StoredCity].self, from: data)
             
-            let tempLocations = decoded.map { (CLLocation(latitude: $0.lat, longitude: $0.long), $0.city)}
+            let locations = decoded.map { (CLLocation(latitude: $0.lat, longitude: $0.long), $0.city)}
             
             DispatchQueue.main.sync {
-                self.cityLocations = tempLocations
+                citiesLoadedCallback?(locations)
             }
         }
     }
     
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        locations.forEach { self.processLocation($0) }
-    }
-    
-    func processLocation(_ location: CLLocation) {
-        var infoDict: InfoDict = [:]
-        
-        if location.horizontalAccuracy >= 0 {
-            let coordinates = location.coordinate
-            infoDict[.latitude] = String(format:"%.6f N", coordinates.latitude)
-            infoDict[.longitude] = String(format:"%.6f E", coordinates.longitude)
-            infoDict[.posAccuracy] = String(format:"± %.2f m", location.horizontalAccuracy)
-            
-            if let prevLocation = lastCityUpdateLocation, lastCityFound != nil && prevLocation.distance(from: location) < 1000 {
-                // No need to update the city
-            } else {
-                lastCityUpdateLocation = location
-                updateClosestCity()
-            }
-            
-            infoDict[.closestCity] = lastCityFound
-        }
-        
-        if location.verticalAccuracy >= 0 {
-            infoDict[.altitude] = String(format:"%.2f m", location.altitude)
-            infoDict[.altAccurracy] = String(format:"± %.2f m", location.verticalAccuracy)
-        }
-        
-        let msSpeed = location.speed
-        if msSpeed >= 0 {
-            let kmSpeed = msSpeed * 3600 / 1000
-            infoDict[.speed] = String(format:"%.2f m/s (%.2f km/h)", msSpeed, kmSpeed)
-        }
-        
-        updateCallback?(infoDict)
-    }
-    
-    private func updateClosestCity() {
-        guard let location = lastCityUpdateLocation else { return }
-        guard !cityLocations.isEmpty else { return }
-        
-        var closestCity: String = "<More than 100 km away>"
-        var closestCityDistance: Double = 100000.0
-        
-        for (candidateCityLocation, candidateCityName) in cityLocations {
-            let distance = location.distance(from: candidateCityLocation)
-            if distance < closestCityDistance {
-                closestCity = candidateCityName
-                closestCityDistance = distance
-            }
-        }
-        
-        lastCityFound = closestCity
+        locations.forEach { updateCallback?($0) }
     }
 }
 
@@ -214,12 +256,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         
         parentView.addSubview(tableView)
         
-        locationUpdater.updateCallback = { infoDict in
-            infoList.infoDict = infoDict
+        locationUpdater.updateCallback = {
+            infoList.infos.updateFrom($0)
             tableView.reloadData()
         }
+        locationUpdater.citiesLoadedCallback = {
+            infoList.infos.cityLocations = $0
+        }
         locationUpdater.start()
-        
+
         window.makeKeyAndVisible()
         
         return true
