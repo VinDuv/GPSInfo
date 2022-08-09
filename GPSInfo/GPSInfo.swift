@@ -5,63 +5,49 @@ import SwiftUI
 import CoreLocation
 import Dispatch
 
-protocol GPSInfoAttribute {
-    var name: String { get }
-    func get(from infos: GPSInfos) -> String
-}
+class GPSInfos: NSObject, ObservableObject, CLLocationManagerDelegate {
+    @Published var latitude: CLLocationDegrees?
+    @Published var longitude: CLLocationDegrees?
+    @Published var posAccuracy: CLLocationAccuracy?
+    @Published var altitude: CLLocationDistance?
+    @Published var altAccuracy: CLLocationAccuracy?
+    @Published var speed: CLLocationSpeed?
+    @Published var closestCity: String?
 
-struct KeyPathInfo<ValType>: GPSInfoAttribute {
-    let name: String
-    let ref: KeyPath<GPSInfos, ValType?>
-    let fmt: (ValType) -> String
-
-    init(_ name: String, _ ref: KeyPath<GPSInfos, ValType?>, _ fmt: @escaping (ValType) -> String) {
-        self.name = name
-        self.ref = ref
-        self.fmt = fmt
-    }
-
-    init(_ name: String, _ ref: KeyPath<GPSInfos, ValType?>, _ fmt: String) {
-        self.name = name
-        self.ref = ref
-        self.fmt = { String(format: fmt, $0 as! CVarArg) }
-    }
-
-    func get(from infos: GPSInfos) -> String {
-        if let rawValue = infos[keyPath: ref] {
-            return fmt(rawValue)
-        }
-
-        return "—"
-    }
-}
-
-struct GPSInfos {
-    var latitude: CLLocationDegrees?
-    var longitude: CLLocationDegrees?
-    var posAccuracy: CLLocationAccuracy?
-    var altitude: CLLocationDistance?
-    var altAccuracy: CLLocationAccuracy?
-    var speed: CLLocationSpeed?
-    var closestCity: String?
-
+    let locationManager = CLLocationManager()
     var cityLocations: [(CLLocation, String)] = []
     var lastCityUpdateLocation: CLLocation?
 
-    static let infoAttributes: [GPSInfoAttribute]  = [
-        KeyPathInfo("Latitude", \.latitude, "%.6f N"),
-        KeyPathInfo("Longitude", \.longitude, "%.6f E"),
-        KeyPathInfo("Position Accuracy", \.posAccuracy, "± %.2f m"),
-        KeyPathInfo("Altitude", \.altitude, "%.2f m"),
-        KeyPathInfo("Altitude Accuracy", \.altAccuracy, "± %.2f m"),
-        KeyPathInfo("Speed", \.speed, {
-            let kmHSpeed = $0 * 3600 / 1000
-            return String(format:"%.2f m/s (%.2f km/h)", $0, kmHSpeed)
-        }),
-        KeyPathInfo("Closest City", \.closestCity, { $0 })
-    ]
+    override init() {
+        super.init()
 
-    mutating func updateFrom(_ location: CLLocation) {
+        if locationManager.authorizationStatus == .notDetermined {
+            locationManager.requestWhenInUseAuthorization()
+        }
+
+        locationManager.activityType = .otherNavigation
+        locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        locationManager.delegate = self
+        locationManager.startUpdatingLocation()
+
+        DispatchQueue.global(qos: .utility).async { [unowned self] in
+            let url = Bundle.main.url(forResource: "cities", withExtension: "plist")!
+            let data = try! Data(contentsOf: url)
+            let decoded = try! PropertyListDecoder().decode([StoredCity].self, from: data)
+
+            let locations = decoded.map { (CLLocation(latitude: $0.lat, longitude: $0.long), $0.city)}
+
+            DispatchQueue.main.sync {
+                cityLocations = locations
+            }
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        locations.forEach { self.updateFrom($0) }
+    }
+
+    private func updateFrom(_ location: CLLocation) {
         if location.horizontalAccuracy >= 0 {
             let coordinates = location.coordinate
             self.latitude = coordinates.latitude
@@ -95,7 +81,7 @@ struct GPSInfos {
         }
     }
 
-    private mutating func updateClosestCity() {
+    private func updateClosestCity() {
         guard let location = lastCityUpdateLocation else { return }
         guard !cityLocations.isEmpty else { return }
 
@@ -113,80 +99,74 @@ struct GPSInfos {
         self.closestCity = closestCity
     }
 
-    func getFormatted() -> [(name: String, value: String)] {
-        let mapped = Self.infoAttributes.map {(name: $0.name, value:$0.get(from: self))}
-        return Array(mapped)
-    }
-}
-
-class GPSInfoManager: NSObject, ObservableObject, CLLocationManagerDelegate {
-    @Published var formattedInfos: [(name: String, value: String)]
-    var infos = GPSInfos()
-
-    let locationManager = CLLocationManager()
-
     struct StoredCity: Decodable {
         var city: String
         var lat: Double
         var long: Double
     }
-    
-    override init() {
-        formattedInfos = infos.getFormatted()
-        super.init()
-
-        if locationManager.authorizationStatus == .notDetermined {
-            locationManager.requestWhenInUseAuthorization()
-        }
-        
-        locationManager.activityType = .otherNavigation
-        locationManager.desiredAccuracy = kCLLocationAccuracyBest
-        locationManager.delegate = self
-        locationManager.startUpdatingLocation()
-        
-        DispatchQueue.global(qos: .utility).async { [unowned self] in
-            let url = Bundle.main.url(forResource: "cities", withExtension: "plist")!
-            let data = try! Data(contentsOf: url)
-            let decoded = try! PropertyListDecoder().decode([StoredCity].self, from: data)
-            
-            let locations = decoded.map { (CLLocation(latitude: $0.lat, longitude: $0.long), $0.city)}
-            
-            DispatchQueue.main.sync {
-                infos.cityLocations = locations
-            }
-        }
-    }
-    
-    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        locations.forEach { infos.updateFrom($0) }
-        formattedInfos = infos.getFormatted()
-    }
 }
 
 
-struct GPSInfoView: View {
-    @EnvironmentObject var infoManager: GPSInfoManager
+struct GPSInfoRow<ValType>: View {
+    let title: String
+    @Binding var value: ValType?
+    let fmt: (ValType) -> String
+
+    init(_ title: String, _ value: Binding<ValType?>, _ fmt: @escaping (ValType) -> String) {
+        self.title = title
+        self._value = value
+        self.fmt = fmt
+    }
+
+    init(_ title: String, _ value: Binding<ValType?>, _ fmt: String) {
+        self.init(title, value) { String(format: fmt, $0 as! CVarArg) }
+    }
 
     var body: some View {
-        List(infoManager.formattedInfos, id: \.name) { info in
-            HStack {
-                Text(info.name)
-                Spacer()
-                Text(info.value)
-                    .foregroundColor(Color.gray)
-                    .font(.system(size: 16).monospacedDigit())
-            }
+        HStack {
+            Text(title)
+            Spacer()
+            Text(formatValue(value))
+                .foregroundColor(Color.gray)
+                .font(.system(size: 16).monospacedDigit())
+        }
+    }
+
+    func formatValue(_ value: ValType?) -> String {
+        if let value = value {
+            return fmt(value)
+        }
+
+        return "—"
+    }
+}
+
+struct GPSInfoView: View {
+    @EnvironmentObject var infos: GPSInfos
+
+    var body: some View {
+        List {
+            GPSInfoRow("Latitude", $infos.latitude, "%.6f N")
+            GPSInfoRow("Longitude", $infos.longitude, "%.6f E")
+            GPSInfoRow("Position Accuracy", $infos.posAccuracy, "± %.2f m")
+            GPSInfoRow("Altitude", $infos.altitude, "%.2f m")
+            GPSInfoRow("Altitude Accuracy", $infos.altAccuracy, "± %.2f m")
+            GPSInfoRow("Speed", $infos.speed, {
+                let kmHSpeed = $0 * 3600 / 1000
+                return String(format:"%.2f m/s (%.2f km/h)", $0, kmHSpeed)
+            })
+            GPSInfoRow("Closest City", $infos.closestCity, { $0 })
         }
     }
 }
 
 @main
 struct GPSInfoApp: App {
-    @StateObject private var infoManager = GPSInfoManager()
+    @StateObject private var infos = GPSInfos()
 
     var body: some Scene {
         WindowGroup {
-            GPSInfoView().environmentObject(infoManager)
+            GPSInfoView().environmentObject(infos)
         }
     }
 }
