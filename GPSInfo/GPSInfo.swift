@@ -14,9 +14,16 @@ class GPSInfos: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var speed: CLLocationSpeed?
     @Published var closestCity: String?
 
+    @Published var markerLocation: CLLocationCoordinate2D?
+    @Published var markerDistance: CLLocationDistance?
+    @Published var markerAltDiff: CLLocationDistance?
+
+    @Published var canSetMarker = false
+
     let locationManager = CLLocationManager()
     var cityLocations: [(CLLocation, String)] = []
     var lastCityUpdateLocation: CLLocation?
+    private var markerAltitude: CLLocationDistance = 0
 
     override init() {
         super.init()
@@ -43,6 +50,20 @@ class GPSInfos: NSObject, ObservableObject, CLLocationManagerDelegate {
         }
     }
 
+    func setMarker() {
+        guard let latitude = self.latitude, let longitude = self.longitude,
+        let altitude = self.altitude else {
+            return
+        }
+
+        self.markerLocation = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        self.markerAltitude = altitude
+        self.markerDistance = 0
+        self.markerAltDiff = 0
+    }
+
+
+
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         locations.forEach { self.updateFrom($0) }
     }
@@ -53,6 +74,7 @@ class GPSInfos: NSObject, ObservableObject, CLLocationManagerDelegate {
             self.latitude = coordinates.latitude
             self.longitude = coordinates.longitude
             self.posAccuracy = location.horizontalAccuracy
+            self.canSetMarker = true
 
             if let prevLocation = lastCityUpdateLocation, closestCity != nil && prevLocation.distance(from: location) < 1000 {
                 // No need to update the city
@@ -60,12 +82,21 @@ class GPSInfos: NSObject, ObservableObject, CLLocationManagerDelegate {
                 lastCityUpdateLocation = location
                 updateClosestCity()
             }
+
+            if let markerLocation = markerLocation {
+                self.markerDistance = location.distance(from: CLLocation(latitude: markerLocation.latitude, longitude: markerLocation.longitude))
+                self.markerAltDiff = location.altitude - markerAltitude
+            }
         } else {
             self.latitude = nil
             self.longitude = nil
             self.posAccuracy = nil
             self.closestCity = nil
             self.lastCityUpdateLocation = nil
+
+            self.canSetMarker = false
+            self.markerDistance = nil
+            self.markerAltDiff = nil
         }
 
         if location.verticalAccuracy >= 0 {
@@ -146,16 +177,29 @@ struct GPSInfoView: View {
 
     var body: some View {
         List {
-            GPSInfoRow("Latitude", $infos.latitude, "%.6f N")
-            GPSInfoRow("Longitude", $infos.longitude, "%.6f E")
-            GPSInfoRow("Position Accuracy", $infos.posAccuracy, "± %.2f m")
-            GPSInfoRow("Altitude", $infos.altitude, "%.2f m")
-            GPSInfoRow("Altitude Accuracy", $infos.altAccuracy, "± %.2f m")
-            GPSInfoRow("Speed", $infos.speed, {
-                let kmHSpeed = $0 * 3600 / 1000
-                return String(format:"%.2f m/s (%.2f km/h)", $0, kmHSpeed)
-            })
-            GPSInfoRow("Closest City", $infos.closestCity, { $0 })
+            Section(header: Text("Current location")) {
+                GPSInfoRow("Latitude", $infos.latitude, "%.6f N")
+                GPSInfoRow("Longitude", $infos.longitude, "%.6f E")
+                GPSInfoRow("Position Accuracy", $infos.posAccuracy, "± %.2f m")
+                GPSInfoRow("Altitude", $infos.altitude, "%.2f m")
+                GPSInfoRow("Altitude Accuracy", $infos.altAccuracy, "± %.2f m")
+                GPSInfoRow("Speed", $infos.speed, {
+                    let kmHSpeed = $0 * 3600 / 1000
+                    return String(format:"%.2f m/s (%.2f km/h)", $0, kmHSpeed)
+                })
+                GPSInfoRow("Closest City", $infos.closestCity, { $0 })
+            }
+            Section(header: Text("Marker")) {
+                GPSInfoRow("Location", $infos.markerLocation) {
+                    return String(format:"%.4f N %.4f E", $0.latitude, $0.longitude)
+                }
+                GPSInfoRow("Distance", $infos.markerDistance, "%.2f m")
+                GPSInfoRow("Altitude difference", $infos.markerAltDiff, "%.2f m")
+
+                Button("Set marker") {
+                    infos.setMarker()
+                }.disabled(!infos.canSetMarker)
+            }
         }
     }
 }
